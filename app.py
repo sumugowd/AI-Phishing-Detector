@@ -5,22 +5,21 @@ import nltk
 from nltk.corpus import stopwords
 from spellchecker import SpellChecker
 
-# Download stopwords once
+# Download once (better to download manually in production)
 nltk.download('stopwords')
 
-# Initialize Flask
 app = Flask(__name__)
 
-# Load trained model
+# Load model
 model = joblib.load("model/model.pkl")
 
-# Initialize spell checker
+# Initialize tools
 spell = SpellChecker()
-
-# Stopwords
 stop_words = set(stopwords.words('english'))
 
-# Urgent / suspicious keywords (Email + SMS focused)
+# Store prediction history (temporary memory storage)
+prediction_history = []
+
 urgent_keywords_list = [
     "urgent", "verify", "immediately", "account",
     "bank", "click", "password", "login", "alert",
@@ -28,8 +27,8 @@ urgent_keywords_list = [
     "action", "required", "update", "payment",
     "blocked", "warning", "rs", "bill", "claim",
     "reward", "offer", "won", "hurry", "save",
-    "top-up", "pay", "prize","bonus", "cash", 
-    "jackpot", "top-up", "free", "extra"
+    "top-up", "pay", "prize", "bonus", "cash",
+    "jackpot", "free", "extra"
 ]
 
 
@@ -40,11 +39,9 @@ def extract_features(email_text):
     num_unique_words = len(set(words))
     num_stopwords = len([w for w in words if w.lower() in stop_words])
 
-    # 🔹 Detect links (http, https, www)
     links = re.findall(r"https?://\S+|www\.\S+", email_text)
     num_links = len(links)
 
-    # 🔹 Extract domains safely
     domains = set()
     for link in links:
         try:
@@ -58,15 +55,12 @@ def extract_features(email_text):
 
     num_unique_domains = len(domains)
 
-    # 🔹 Detect email addresses
     emails = re.findall(r"\S+@\S+", email_text)
     num_email_addresses = len(emails)
 
-    # 🔹 Spelling errors
     misspelled = spell.unknown(words)
     num_spelling_errors = len(misspelled)
 
-    # 🔹 Count urgent keywords
     num_urgent_keywords = sum(
         1 for w in words if w.lower().strip(".,!:") in urgent_keywords_list
     )
@@ -85,38 +79,45 @@ def extract_features(email_text):
 
 @app.route("/", methods=["GET", "POST"])
 def home():
+
+    # Initialize variables for both GET and POST
     result = None
     confidence = None
     risk_level = None
+    features = None   # 🔥 important fix
 
     if request.method == "POST":
-        email_text = request.form["email_text"]
+
+        email_text = request.form.get("email_text", "").strip()
+
+        if email_text == "":
+            return render_template(
+                "dashboard.html",
+                result="⚠️ Please enter email content",
+                confidence=0,
+                risk_level="N/A",
+                features=None,
+                history=prediction_history
+            )
 
         features = extract_features(email_text)
 
-        # 🔹 Base ML probability
+        # Base ML probability
         prob = model.predict_proba([features])[0][1]
 
-        # 🔹 Hybrid Heuristic Boost
         num_links = features[3]
         num_urgent_keywords = features[7]
 
-        # Strong boost for shortened URLs
+        # Hybrid heuristic boosting
         if "bit.ly" in email_text or "tinyurl" in email_text or "t.co" in email_text:
-             prob += 0.20
+            prob += 0.20
 
-
-        # Link weight
         prob += 0.08 * num_links
-
-        # Urgent keyword weight
         prob += 0.05 * num_urgent_keywords
 
-        # SMS style phishing pattern boost
         if num_links > 0 and num_urgent_keywords > 0:
             prob += 0.10
 
-        # Cap probability to 1
         prob = min(prob, 1.0)
 
         threshold = 0.20
@@ -135,11 +136,25 @@ def home():
         else:
             risk_level = "High Risk"
 
+        # Save in memory history
+        prediction_history.append({
+            "text": email_text[:60] + "...",
+            "result": result,
+            "confidence": confidence,
+            "risk": risk_level
+        })
+
+        # Keep only last 10 records (professional touch)
+        if len(prediction_history) > 10:
+            prediction_history.pop(0)
+
     return render_template(
-        "index.html",
+        "dashboard.html",
         result=result,
         confidence=confidence,
-        risk_level=risk_level
+        risk_level=risk_level,
+        features=features,
+        history=prediction_history
     )
 
 
